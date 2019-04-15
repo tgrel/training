@@ -64,6 +64,7 @@ def parse_args():
                         help='eps for Adam')
     parser.add_argument('--user_scaling', default=1, type=int)
     parser.add_argument('--item_scaling', default=1, type=int)
+    parser.add_argument('--validations_per_epoch', default=10, type=int)
     parser.add_argument('--cpu_dataloader', action='store_true',
                         help='pre-process data on cpu to save memory')
     parser.add_argument('--random_negatives', action='store_true',
@@ -116,6 +117,15 @@ def val_epoch(model, x, y, dup_mask, real_indices, K, samples_per_user, num_user
         utils.save_result(result, output)
 
     return hits/num_user, ndcg/num_user
+
+
+def validation_iter_indices(num_batches, validations_per_epoch):
+    indices = np.arange(1, validations_per_epoch + 1) * (num_batches / validations_per_epoch)
+    #zero based indexing
+    indices = np.round(indices - 1).astype(int)
+    assert indices[-1] == num_batches - 1
+    assert(len(indices) == validations_per_epoch)
+    return indices
 
 
 def main():
@@ -340,7 +350,6 @@ def main():
 
         # shuffle prepared data and split into batches
         epoch_indices = torch.randperm(len(epoch_users), device=dataloader_device)
-        epoch_size = len(epoch_indices)
         epoch_users = epoch_users[epoch_indices]
         epoch_items = epoch_items[epoch_indices]
         epoch_label = train_label[epoch_indices]
@@ -348,21 +357,25 @@ def main():
         epoch_items_list = epoch_items.split(local_batch)
         epoch_label_list = epoch_label.split(local_batch)
 
+        # drop the last batch to maintain equal batch size
+        epoch_users_list = epoch_users_list[:-1]
+        epoch_items_list = epoch_items_list[:-1]
+        epoch_label_list = epoch_label_list[:-1]
+
         print("shuffle time: {:.2f}", timeit.default_timer() - st)
 
         # only print progress bar on rank 0
-        num_batches = (epoch_size + args.batch_size - 1) // args.batch_size
+        num_batches = len(epoch_users_list)
         qbar = tqdm.tqdm(range(num_batches))
-        # handle extremely rare case where last batch size < number of worker
-        if len(epoch_users_list) < num_batches:
-            print("epoch_size % batch_size < number of worker!")
-            exit(1)
-        
+
         after_shuffle = time.time()
         
         neg_gen_time = (after_neg_gen - begin)
         shuffle_time = (after_shuffle - after_neg_gen)
 
+        validation_iters = validation_iter_indices(num_batches=num_batches,
+                                                   validations_per_epoch=args.validations_per_epoch)
+        train_begin = time.time()
         for i in qbar:
             # selecting input from prepared data
             user = epoch_users_list[i].cuda()
@@ -378,34 +391,35 @@ def main():
 
             loss.backward()
             optimizer.step()
-       
+
+            if i in validation_iters:
+                train_end = time.time()
+                mlperf_log.ncf_print(key=mlperf_log.EVAL_START, value=epoch)
+                valid_begin = time.time()
+                valid_end = time.time()
+                hr, ndcg = val_epoch(model, test_users, test_items, dup_mask, real_indices, args.topk,
+                                     samples_per_user=samples_per_user,
+                                     num_user=nb_users, output=valid_results_file, epoch=epoch, loss=loss.data.item())
+
+                print('Epoch {epoch}, iter {iter}: HR@{K} = {hit_rate:.4f}, NDCG@{K} = {ndcg:.4f},'
+                        ' loss = {loss:.4f}, train_time: {train_time}, valid_time: {valid_time}'
+                        ' neg_gen: {neg_gen_time:.4f}, shuffle_time: {shuffle_time:.2f}'
+                      .format(epoch=epoch, iter=i, K=args.topk, hit_rate=hr,
+                              ndcg=ndcg, loss=loss.data.item(), valid_time=valid_end - valid_begin,
+                              train_time=train_end - train_begin, neg_gen_time=neg_gen_time, shuffle_time=shuffle_time))
+
+                mlperf_log.ncf_print(key=mlperf_log.EVAL_ACCURACY, value={"epoch": epoch, "value": hr})
+                mlperf_log.ncf_print(key=mlperf_log.EVAL_TARGET, value=args.threshold)
+                mlperf_log.ncf_print(key=mlperf_log.EVAL_STOP, value=epoch)
+
+                if args.threshold is not None and hr >= args.threshold:
+                    print("Hit threshold of {}".format(args.threshold))
+                    success = True
+                    break
         del epoch_users, epoch_items, epoch_label, epoch_users_list, epoch_items_list, epoch_label_list, user, item, label
-        train_time = time.time() - begin
-        begin = time.time()
+        if success:
+            break
 
-        mlperf_log.ncf_print(key=mlperf_log.EVAL_START, value=epoch)
-
-        hr, ndcg = val_epoch(model, test_users, test_items, dup_mask, real_indices, args.topk, samples_per_user=samples_per_user,
-                             num_user=nb_users, output=valid_results_file, epoch=epoch, loss=loss.data.item())
-
-        val_time = time.time() - begin
-        print('Epoch {epoch}: HR@{K} = {hit_rate:.4f}, NDCG@{K} = {ndcg:.4f},'
-                ' train_time = {train_time:.2f}, val_time = {val_time:.2f}, loss = {loss:.4f},'
-                ' neg_gen: {neg_gen_time:.4f}, shuffle_time: {shuffle_time:.2f}'
-              .format(epoch=epoch, K=args.topk, hit_rate=hr,
-                      ndcg=ndcg, train_time=train_time,
-                      val_time=val_time, loss=loss.data.item(),
-                      neg_gen_time=neg_gen_time, shuffle_time=shuffle_time))
-
-        mlperf_log.ncf_print(key=mlperf_log.EVAL_ACCURACY, value={"epoch": epoch, "value": hr})
-        mlperf_log.ncf_print(key=mlperf_log.EVAL_TARGET, value=args.threshold)
-        mlperf_log.ncf_print(key=mlperf_log.EVAL_STOP, value=epoch)
-
-        if args.threshold is not None:
-            if hr >= args.threshold:
-                print("Hit threshold of {}".format(args.threshold))
-                success = True
-                break
 
     mlperf_log.ncf_print(key=mlperf_log.RUN_STOP, value={"success": success})
     run_stop_time = time.time()
