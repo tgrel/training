@@ -175,6 +175,10 @@ def main():
       print("Using alias file: {}".format(args.data))
       with open(sampler_cache, "rb") as f:
         sampler, pos_users, pos_items, nb_items, _ = pickle.load(f)
+    nb_items = int(nb_items)
+
+
+    # print datetime
     print(datetime.now(), "Alias table loaded.")
 
     nb_users = len(sampler.num_regions)
@@ -352,7 +356,9 @@ def main():
 
         # only print progress bar on rank 0
         num_batches = (epoch_size + args.batch_size - 1) // args.batch_size
-        qbar = tqdm.tqdm(range(num_batches))
+
+        # update the progress bar once every 60 seconds
+        qbar = tqdm.tqdm(range(num_batches), mininterval=60)
         # handle extremely rare case where last batch size < number of worker
         if len(epoch_users_list) < num_batches:
             print("epoch_size % batch_size < number of worker!")
