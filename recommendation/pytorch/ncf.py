@@ -184,6 +184,7 @@ def main():
     nb_users = len(sampler.num_regions)
     train_users = torch.from_numpy(pos_users).type(torch.LongTensor)
     train_items = torch.from_numpy(pos_items).type(torch.LongTensor)
+    del pos_users, pos_items
 
     mlperf_log.ncf_print(key=mlperf_log.INPUT_SIZE, value=len(train_users))
     # produce things not change between epoch
@@ -210,6 +211,8 @@ def main():
               chunk+1, args.user_scaling, test_negatives[chunk].size()))
 
     test_neg_items = [l[:, 1] for l in test_negatives]
+    del test_negatives
+
 
     # create items with real sample at last position
     test_items = [torch.cat((a.reshape(-1,args.valid_negative), b), dim=1)
@@ -332,14 +335,15 @@ def main():
             negatives = torch.from_numpy(negatives)
             neg_users = negatives[:, 0]
             neg_items = negatives[:, 1]
+            del negatives
 
         print("generate_negatives loop time: {:.2f}", timeit.default_timer() - st)
 
         after_neg_gen = time.time()
 
         st = timeit.default_timer()
-        epoch_users = torch.cat((train_users,neg_users))
-        epoch_items = torch.cat((train_items,neg_items))
+        epoch_users = torch.cat((train_users, neg_users))
+        epoch_items = torch.cat((train_items, neg_items))
         del neg_users, neg_items
 
         # shuffle prepared data and split into batches
@@ -348,6 +352,8 @@ def main():
         epoch_users = epoch_users[epoch_indices]
         epoch_items = epoch_items[epoch_indices]
         epoch_label = train_label[epoch_indices]
+        del epoch_indices
+
         epoch_users_list = epoch_users.split(local_batch)
         epoch_items_list = epoch_items.split(local_batch)
         epoch_label_list = epoch_label.split(local_batch)
