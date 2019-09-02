@@ -351,7 +351,7 @@ def main():
         epoch_label = train_label
         # shuffle prepared data and split into batches
         chunk_size = 2**20
-        num_chunks = math.ceil(train_users.size()[0] / chunk_size)
+        num_chunks = math.ceil(epoch_users.size()[0] / chunk_size)
         for i in range(num_chunks):
             begin = i * chunk_size
             end = min((i + 1) * chunk_size, epoch_users.size()[0])
