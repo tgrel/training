@@ -32,14 +32,13 @@ def parse_args():
 def generate_negatives(sampler, num_negatives, users):
     result = []
 
-    neg_users = np.repeat(users, num_negatives)
-    num_batches = (neg_users.shape[0] // NEG_ELEMS_BATCH_SZ) + 1
-    user_batches = np.array_split(neg_users, num_batches)
+    users = np.repeat(users, num_negatives)
+    num_batches = (users.shape[0] // NEG_ELEMS_BATCH_SZ) + 1
+    user_batches = np.array_split(users, num_batches)
 
-    neg_users_items = np.empty([num_negatives], object)
     for i in range(num_batches):
-        result.append(sampler.sample_negatives(user_batches[i]))
-    result = np.array([neg_users, np.concatenate(result)])
+        result.append(sampler.sample_negatives(user_batches[i]).astype(np.int32))
+    result = np.array([users, np.concatenate(result)])
     return result.transpose()
 
 

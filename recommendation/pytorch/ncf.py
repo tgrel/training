@@ -84,6 +84,9 @@ def val_epoch(model, x, y, dup_mask, real_indices, K, samples_per_user, num_user
 
     with torch.no_grad():
         for i, (u,n) in enumerate(zip(x,y)):
+            u = u.type(torch.int64)
+            n = n.type(torch.int64)
+
             res = model(u.cuda().view(-1), n.cuda().view(-1), sigmoid=True).detach().view(-1,samples_per_user)
             # set duplicate results for the same item to -1 before topk
             res[dup_mask[i]] = -1
@@ -166,7 +169,7 @@ def main():
     for chunk in range(args.user_scaling):
         test_ratings[chunk] = torch.from_numpy(np.load(args.data + '/testx' 
                 + str(args.user_scaling) + 'x' + str(args.item_scaling) 
-                + '_' + str(chunk) + '.npz', encoding='bytes')['arr_0'])
+                + '_' + str(chunk) + '.npz', encoding='bytes')['arr_0']).type(torch.int32)
         
     fn_prefix = args.data + '/' + CACHE_FN.format(args.user_scaling, args.item_scaling)
     sampler_cache = fn_prefix + "cached_sampler.pkl"
@@ -174,27 +177,25 @@ def main():
     if os.path.exists(args.data):
       print("Using alias file: {}".format(args.data))
       with open(sampler_cache, "rb") as f:
-        sampler, pos_users, pos_items, nb_items, _ = pickle.load(f)
+        sampler, train_users, train_items, nb_items, _ = pickle.load(f)
     nb_items = int(nb_items)
-
 
     # print datetime
     print(datetime.now(), "Alias table loaded.")
 
     nb_users = len(sampler.num_regions)
-    train_users = torch.from_numpy(pos_users).type(torch.LongTensor)
-    train_items = torch.from_numpy(pos_items).type(torch.LongTensor)
-    del pos_users, pos_items
+    train_users = torch.from_numpy(train_users).type(torch.int32)
+    train_items = torch.from_numpy(train_items).type(torch.int32)
 
     mlperf_log.ncf_print(key=mlperf_log.INPUT_SIZE, value=len(train_users))
     # produce things not change between epoch
     # mask for filtering duplicates with real sample
     # note: test data is removed before create mask, same as reference
     # create label
-    train_label = torch.ones_like(train_users, dtype=torch.float32)
-    neg_label = torch.zeros_like(train_label, dtype=torch.float32)
+    train_label = torch.ones_like(train_users, dtype=torch.uint8)
+    neg_label = torch.zeros_like(train_label, dtype=torch.uint8)
     neg_label = neg_label.repeat(args.negative_samples)
-    train_label = torch.cat((train_label,neg_label))
+    train_label = torch.cat((train_label, neg_label))
     del neg_label
 
     test_pos = [l[:,1].reshape(-1,1) for l in test_ratings]
@@ -206,7 +207,7 @@ def main():
         file_name = (args.data + '/test_negx' + str(args.user_scaling) + 'x'
                 + str(args.item_scaling) + '_' + str(chunk) + '.npz')
         raw_data = np.load(file_name, encoding='bytes')
-        test_negatives[chunk] = torch.from_numpy(raw_data['arr_0'])
+        test_negatives[chunk] = torch.from_numpy(raw_data['arr_0']).type(torch.int32)
         print(datetime.now(), "Test negative chunk {} of {} loaded ({} users).".format(
               chunk+1, args.user_scaling, test_negatives[chunk].size()))
 
@@ -247,11 +248,11 @@ def main():
 
     # For our dataset, test set is identical to user set, so arange() provides
     # all test users.
-    test_users = torch.arange(nb_users, dtype=torch.long)
+    test_users = torch.arange(nb_users, dtype=torch.int32)
     test_users = test_users[:, None]
-    test_users = test_users + torch.zeros(1+args.valid_negative, dtype=torch.long)
+    test_users = test_users + torch.zeros(1+args.valid_negative, dtype=torch.int32)
     # test_items needs to be of type Long in order to be used in embedding
-    test_items = torch.cat(test_items).type(torch.long)
+    test_items = torch.cat(test_items).type(torch.int32)
 
     dup_mask = torch.cat(dup_mask)
     real_indices = torch.cat(real_indices)
@@ -326,13 +327,13 @@ def main():
         st = timeit.default_timer()
         if args.random_negatives:
             neg_users = train_users.repeat(args.negative_samples)
-            neg_items = torch.empty_like(neg_users, dtype=torch.int64).random_(0, nb_items)
+            neg_items = torch.empty_like(neg_users, dtype=torch.int32).random_(0, nb_items)
         else:
             negatives = generate_negatives(
                 sampler,
                 args.negative_samples,
                 train_users.numpy())
-            negatives = torch.from_numpy(negatives)
+            negatives = torch.from_numpy(negatives).type(torch.int32)
             neg_users = negatives[:, 0]
             neg_items = negatives[:, 1]
             del negatives
@@ -343,20 +344,27 @@ def main():
 
         st = timeit.default_timer()
         epoch_users = torch.cat((train_users, neg_users))
+        del neg_users
         epoch_items = torch.cat((train_items, neg_items))
-        del neg_users, neg_items
+        del neg_items
 
+        epoch_label = train_label
         # shuffle prepared data and split into batches
-        epoch_indices = torch.randperm(len(epoch_users), device=dataloader_device)
-        epoch_size = len(epoch_indices)
-        epoch_users = epoch_users[epoch_indices]
-        epoch_items = epoch_items[epoch_indices]
-        epoch_label = train_label[epoch_indices]
-        del epoch_indices
+        chunk_size = 2**20
+        num_chunks = math.ceil(train_users.size()[0] / chunk_size)
+        for i in range(num_chunks):
+            begin = i * chunk_size
+            end = min((i + 1) * chunk_size, epoch_users.size()[0])
+            shuffle_indices = torch.randperm(end - begin) + begin
+            epoch_users[begin:end] = epoch_users[shuffle_indices]
+            epoch_items[begin:end] = epoch_items[shuffle_indices]
+            epoch_label[begin:end] = epoch_label[shuffle_indices]
 
-        epoch_users_list = epoch_users.split(local_batch)
-        epoch_items_list = epoch_items.split(local_batch)
-        epoch_label_list = epoch_label.split(local_batch)
+        epoch_size = epoch_users.shape[0]
+
+        epoch_users = epoch_users.split(local_batch)
+        epoch_items = epoch_items.split(local_batch)
+        epoch_label = epoch_label.split(local_batch)
 
         print("shuffle time: {:.2f}", timeit.default_timer() - st)
 
@@ -366,7 +374,7 @@ def main():
         # update the progress bar once every 60 seconds
         qbar = tqdm.tqdm(range(num_batches), mininterval=60)
         # handle extremely rare case where last batch size < number of worker
-        if len(epoch_users_list) < num_batches:
+        if len(epoch_users) < num_batches:
             print("epoch_size % batch_size < number of worker!")
             exit(1)
         
@@ -377,9 +385,9 @@ def main():
 
         for i in qbar:
             # selecting input from prepared data
-            user = epoch_users_list[i].cuda()
-            item = epoch_items_list[i].cuda()
-            label = epoch_label_list[i].view(-1,1).cuda()
+            user = epoch_users[i].type(torch.int64).cuda()
+            item = epoch_items[i].type(torch.int64).cuda()
+            label = epoch_label[i].type(torch.float32).view(-1,1).cuda()
 
             for p in model.parameters():
                 p.grad = None
@@ -391,7 +399,7 @@ def main():
             loss.backward()
             optimizer.step()
        
-        del epoch_users, epoch_items, epoch_label, epoch_users_list, epoch_items_list, epoch_label_list, user, item, label
+        del epoch_users, epoch_items, epoch_label, user, item, label
         train_time = time.time() - begin
         begin = time.time()
 
