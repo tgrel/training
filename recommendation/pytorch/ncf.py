@@ -71,6 +71,15 @@ def parse_args():
     return parser.parse_args()
 
 
+def interleave_tensors(p, n):
+    data = torch.cat([p, n])
+    n = n.reshape(p.shape[0], -1)
+    p = p.reshape(p.shape[0], 1)
+    data = torch.cat([p, n], dim=1)
+    data = data.reshape(-1)
+    return data
+
+
 # TODO: val_epoch is not currently supported on cpu
 def val_epoch(model, x, y, dup_mask, real_indices, K, samples_per_user, num_user, output=None,
               epoch=None, loss=None):
@@ -193,10 +202,7 @@ def main():
     # note: test data is removed before create mask, same as reference
     # create label
     train_label = torch.ones_like(train_users, dtype=torch.uint8)
-    neg_label = torch.zeros_like(train_label, dtype=torch.uint8)
-    neg_label = neg_label.repeat(args.negative_samples)
-    train_label = torch.cat((train_label, neg_label))
-    del neg_label
+    #train_label = torch.cat((train_label, neg_label))
 
     test_pos = [l[:,1].reshape(-1,1) for l in test_ratings]
     test_negatives = [torch.LongTensor()] * args.user_scaling
@@ -343,14 +349,20 @@ def main():
         after_neg_gen = time.time()
 
         st = timeit.default_timer()
-        epoch_users = torch.cat((train_users, neg_users))
+        #epoch_users = torch.cat((train_users, neg_users))
+        epoch_users = interleave_tensors(train_users, neg_users)
         del neg_users
-        epoch_items = torch.cat((train_items, neg_items))
+        #epoch_items = torch.cat((train_items, neg_items))
+        epoch_items = interleave_tensors(train_items, neg_items)
         del neg_items
 
-        epoch_label = train_label
+        neg_label = torch.zeros_like(train_label, dtype=torch.uint8)
+        neg_label = neg_label.repeat(args.negative_samples)
+        epoch_label = interleave_tensors(train_label, neg_label)
+
         # shuffle prepared data and split into batches
-        chunk_size = 2**20
+        #chunk_size = 2**24
+        chunk_size = epoch_users.size()[0]
         num_chunks = math.ceil(epoch_users.size()[0] / chunk_size)
         for i in range(num_chunks):
             begin = i * chunk_size
@@ -395,6 +407,8 @@ def main():
             outputs = model(user, item)
             loss = traced_criterion(outputs, label).float()
             loss = torch.mean(loss.view(-1), 0)
+            print('loss: ', loss.item(), 'label: ', label.mean().item(), 'output: ', outputs.mean().item())
+            #import ipdb; ipdb.set_trace()
 
             loss.backward()
             optimizer.step()
