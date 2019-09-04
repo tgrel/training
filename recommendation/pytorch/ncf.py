@@ -64,6 +64,7 @@ def parse_args():
                         help='eps for Adam')
     parser.add_argument('--user_scaling', default=1, type=int)
     parser.add_argument('--item_scaling', default=1, type=int)
+    parser.add_argument('--shuffle_chunk_size', default=2**25, type=int)
     parser.add_argument('--cpu_dataloader', action='store_true',
                         help='pre-process data on cpu to save memory')
     parser.add_argument('--random_negatives', action='store_true',
@@ -195,6 +196,12 @@ def main():
     nb_users = len(sampler.num_regions)
     train_users = torch.from_numpy(train_users).type(torch.int32)
     train_items = torch.from_numpy(train_items).type(torch.int32)
+
+    # the positives are sorted by user id by default, shuffle them immediately
+    shuffle_indices = torch.randperm(train_users.shape[0])
+    train_users = train_users[shuffle_indices]
+    train_items = train_items[shuffle_indices]
+
 
     mlperf_log.ncf_print(key=mlperf_log.INPUT_SIZE, value=len(train_users))
     # produce things not change between epoch
@@ -360,13 +367,11 @@ def main():
         neg_label = neg_label.repeat(args.negative_samples)
         epoch_label = interleave_tensors(train_label, neg_label)
 
-        # shuffle prepared data and split into batches
-        #chunk_size = 2**24
-        chunk_size = epoch_users.size()[0]
-        num_chunks = math.ceil(epoch_users.size()[0] / chunk_size)
+        # ideally this should be much more than train batch size
+        num_chunks = math.ceil(epoch_users.size()[0] / args.shuffle_chunk_size)
         for i in range(num_chunks):
-            begin = i * chunk_size
-            end = min((i + 1) * chunk_size, epoch_users.size()[0])
+            begin = i * args.shuffle_chunk_size
+            end = min((i + 1) * args.shuffle_chunk_size, epoch_users.size()[0])
             shuffle_indices = torch.randperm(end - begin) + begin
             epoch_users[begin:end] = epoch_users[shuffle_indices]
             epoch_items[begin:end] = epoch_items[shuffle_indices]
